@@ -208,7 +208,7 @@ class NFSeNacional
     }
 
     /**
-     * Extrai o NÚMERO da NFS-e (nDFSe) do XML
+     * Extrai o número da NFS-e (nDFSe) do XML
      */
     private function extrairNDFSe(string $xmlNfse): ?string
     {
