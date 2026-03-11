@@ -92,7 +92,7 @@ Gerar uma NFS-e.
         // echo $xmlBruto;
         // exit;
 
-        // 4. Aplica a assinatura digital (NOVO)
+        // 4. Aplica a assinatura digital
         $xmlAssinado = $nfse->assinarXML($xmlBruto);
         // header('Content-Type: application/xml; charset=utf-8');
         // echo $xmlAssinado;
