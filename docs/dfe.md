@@ -70,7 +70,6 @@ Contribuinte: Ela baixa documentos onde o CNPJ do certificado digital é o Prest
             echo "<td><textarea style='width: 100%; height: 50px; font-size: 10px;'>{$xml}</textarea></td>";
             echo "</tr>";
         }
-
         echo "</table>";
 
         // Exibe o último NSU para você salvar no banco e usar na próxima consulta

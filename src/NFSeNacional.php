@@ -453,6 +453,50 @@ class NFSeNacional
         return $dom->saveXML();
     }
 
+    /**
+     * DistribuiÃ§Ã£o de DF-e para o Contribuinte (Baixar notas por NSU)
+     * * @param int $nsu NÃºmero Sequencial Ãšnico para inÃ­cio da consulta
+     * @param string|null $cnpjConsulta CNPJ a ser consultado (opcional se for o do certificado)
+     * @param bool $lote Define se deve retornar um lote de documentos ou apenas um
+     */
+    public function baixarDfeContribuinte(int $nsu = 0, ?string $cnpjConsulta = null, bool $lote = true): array
+    {
+        try {
+            $queryParams = [];
+            if ($cnpjConsulta) {
+                $queryParams['cnpjConsulta'] = preg_replace('/\D/', '', $cnpjConsulta);
+            }
+            $queryParams['lote'] = $lote ? 'true' : 'false';
+
+            // No padrÃ£o Nacional, esse serviÃ§o costuma rodar na URL do ADN (mesma do DANFSE)
+            // Mas o caminho base depende da implementaÃ§Ã£o da prefeitura/nacional.
+            // Vamos usar a urlParametrizacao ou urlDanfse como base de host se necessÃ¡rio
+            $baseUrlADN = str_replace('/danfse', '', $this->urlDanfse);
+            $url = "{$baseUrlADN}/contribuintes/DFe/{$nsu}";
+
+            $response = $this->client->get($url, [
+                'query' => $queryParams
+            ]);
+
+            $body = $response->getBody()->getContents();
+            
+            return [
+                'codigo' => '000',
+                'mensagem' => 'Consulta de DF-e realizada.',
+                'dados' => json_decode($body, true),
+                'bodyOriginal' => $body
+            ];
+
+        } catch (RequestException $e) {
+            return $this->tratarExcecaoRequest($e, 'Erro ao baixar DFe');
+        } catch (Exception $e) {
+            return [
+                'codigo' => '999',
+                'mensagem' => 'Erro: ' . $e->getMessage()
+            ];
+        }
+    }
+
     // =========================================================================
     // FUNÇÕES AUXILIARES
     // =========================================================================
