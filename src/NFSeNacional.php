@@ -266,6 +266,193 @@ class NFSeNacional
         }
     }
 
+    /**
+     * Cancela uma NFS-e
+     * POST /nfse/{chaveAcesso}/eventos
+     * 
+     * @param string $chaveAcesso Chave de acesso da NFS-e
+     * @param string $cnpjAutor CNPJ do autor do cancelamento
+     * @param int $cMotivo CÃƒÆ’Ã‚Â³digo do motivo (1=Erro na emissÃƒÆ’Ã‚Â£o, 2=ServiÃƒÆ’Ã‚Â§o nÃƒÆ’Ã‚Â£o prestado, 3=Outros)
+     * @param string $xMotivo DescriÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o do motivo
+     * @param string $xmlEventoAssinado XML do pedido de registro de evento assinado
+     * @return array Resultado do cancelamento
+     */
+    /**
+     * Cancela uma NFS-e enviando o evento assinado e compactado
+     */
+    public function cancelarNFSe(string $chaveAcesso, string $cnpjAutor, int $cMotivo, string $xMotivo): array
+    {
+        try {
+            // 1. Gera o XML limpo
+            $xmlLimpo = $this->montarXmlCancelamento($chaveAcesso, $cnpjAutor, $cMotivo, $xMotivo);
+            
+            // 2. Assina o XML (passando a tag correta infPedReg)
+            $xmlAssinado = $this->assinarXMLCan($xmlLimpo, 'infPedReg');
+            
+            // 3. Compacta e Codifica (O segredo do sucesso)
+            $gz = gzencode($xmlAssinado);
+            $peloGzipB64 = base64_encode($gz);
+            
+            $dados = [
+                'pedidoRegistroEventoXmlGZipB64' => $peloGzipB64
+            ];
+
+            // 4. Envia para o governo
+            // O endpoint de cancelamento geralmente Ã© POST /nfse/{chave}/eventos
+            $response = $this->client->post("/SefinNacional/nfse/{$chaveAcesso}/eventos", [
+                'json' => $dados
+            ]);
+
+            $body = $response->getBody()->getContents();
+            return [
+                'codigo' => '000',
+                'mensagem' => 'RequisiÃ§Ã£o de cancelamento enviada.',
+                'resposta' => json_decode($body, true)
+            ];
+
+        } catch (RequestException $e) {
+            return $this->tratarExcecaoRequest($e, 'Erro ao cancelar NFS-e');
+        } catch (Exception $e) {
+            return ['codigo' => '999', 'mensagem' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Monta o XML do Pedido de Registro de Evento (cancelamento)
+     * 
+     * @param string $chaveAcesso Chave de acesso da NFS-e
+     * @param string $cnpjAutor CNPJ do autor
+     * @param int $cMotivo CÃƒÆ’Ã‚Â³digo do motivo (1, 2 ou 3)
+     * @param string $xMotivo DescriÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o do motivo
+     * @return string XML do pedido de evento (sem assinatura)
+     */
+    public function montarXmlCancelamento(string $chaveAcesso, string $cnpjAutor, int $cMotivo, string $xMotivo): string
+    {
+        $ns = self::NS_NFSE;
+        $codEvento = '101101';
+
+        $idInfPed = "PRE{$chaveAcesso}{$codEvento}";
+        $dhEvento = date('Y-m-d\TH:i:sP');
+
+        $xDesc = 'Cancelamento de NFS-e';
+        switch ($cMotivo) {
+            case 1:
+                $motivoDescricao = 'Erro na emissao';
+                break;
+            case 2:
+                $motivoDescricao = 'Servico nao prestado';
+                break;
+            default:
+                $motivoDescricao = 'Outros';
+        }
+
+        $xml = new DOMDocument('1.0', 'UTF-8');
+        $xml->formatOutput = true;
+
+        $pedRegEvento = $xml->createElementNS($ns, 'pedRegEvento');
+        $pedRegEvento->setAttribute('versao', '1.00');
+        $xml->appendChild($pedRegEvento);
+
+        $infPedReg = $xml->createElement('infPedReg');
+        $infPedReg->setAttribute('Id', $idInfPed);
+        $pedRegEvento->appendChild($infPedReg);
+
+        $this->addElement($xml, $infPedReg, 'tpAmb', (string)$this->tpAmb);
+        $this->addElement($xml, $infPedReg, 'verAplic', self::VER_APLIC);
+        $this->addElement($xml, $infPedReg, 'dhEvento', $dhEvento);
+        $this->addElement($xml, $infPedReg, 'CNPJAutor', $this->apenasNumeros($cnpjAutor));
+        $this->addElement($xml, $infPedReg, 'chNFSe', $chaveAcesso);
+
+        $e101101 = $xml->createElement('e101101');
+        $infPedReg->appendChild($e101101);
+
+        $this->addElement($xml, $e101101, 'xDesc', $xDesc);
+        $this->addElement($xml, $e101101, 'cMotivo', (string)$cMotivo);
+        $this->addElement($xml, $e101101, 'xMotivo', $xMotivo ?: $motivoDescricao);
+
+        return $xml->saveXML();
+    }
+
+    public function assinarXMLCan(string $xml, string $rootTag = 'infPedReg'): string
+    {
+        $dom = new \DOMDocument('1.0', 'UTF-8');
+        $dom->preserveWhiteSpace = false;
+        $dom->formatOutput = false; // Importante: nÃ£o formatar para nÃ£o quebrar a assinatura
+        $dom->loadXML($xml);
+
+        // 1. Identifica o nÃ³ pelo nome passado (infDPS ou infPedReg)
+        $node = $dom->getElementsByTagName($rootTag)->item(0);
+        if (!$node) {
+            throw new \Exception("Tag {$rootTag} nÃ£o encontrada no XML para assinatura.");
+        }
+        
+        $id = $node->getAttribute('Id');
+
+        // 2. Extrai chaves do certificado
+        $pfxContent = file_get_contents($this->certPath);
+        openssl_pkcs12_read($pfxContent, $certs, $this->certPassword);
+        $privateKey = $certs['pkey'];
+        $publicCert = $certs['cert'];
+        $cleanCert = str_replace(["-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----", "\n", "\r"], '', $publicCert);
+
+        // 3. Digest Value (Hash do ConteÃºdo)
+        $canonNode = $node->C14N(false, false);
+        $digestValue = base64_encode(sha1($canonNode, true));
+
+        // 4. Monta a estrutura Signature
+        $signature = $dom->createElementNS('http://www.w3.org/2000/09/xmldsig#', 'Signature');
+        $dom->documentElement->appendChild($signature);
+
+        $signedInfo = $dom->createElement('SignedInfo');
+        $signature->appendChild($signedInfo);
+
+        $cm = $dom->createElement('CanonicalizationMethod');
+        $cm->setAttribute('Algorithm', 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315');
+        $signedInfo->appendChild($cm);
+
+        $sm = $dom->createElement('SignatureMethod');
+        $sm->setAttribute('Algorithm', 'http://www.w3.org/2000/09/xmldsig#rsa-sha1');
+        $signedInfo->appendChild($sm);
+
+        $reference = $dom->createElement('Reference');
+        $reference->setAttribute('URI', "#$id");
+        $signedInfo->appendChild($reference);
+
+        $transforms = $dom->createElement('Transforms');
+        $reference->appendChild($transforms);
+
+        $t1 = $dom->createElement('Transform');
+        $t1->setAttribute('Algorithm', 'http://www.w3.org/2000/09/xmldsig#enveloped-signature');
+        $transforms->appendChild($t1);
+
+        $t2 = $dom->createElement('Transform');
+        $t2->setAttribute('Algorithm', 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315');
+        $transforms->appendChild($t2);
+
+        $dm = $dom->createElement('DigestMethod');
+        $dm->setAttribute('Algorithm', 'http://www.w3.org/2000/09/xmldsig#sha1');
+        $reference->appendChild($dm);
+
+        $dv = $dom->createElement('DigestValue', $digestValue);
+        $reference->appendChild($dv);
+
+        // 5. Signature Value (Assinatura do SignedInfo)
+        $canonSignedInfo = $signedInfo->C14N(false, false);
+        openssl_sign($canonSignedInfo, $signatureValue, $privateKey, OPENSSL_ALGO_SHA1);
+        
+        $sv = $dom->createElement('SignatureValue', base64_encode($signatureValue));
+        $signature->appendChild($sv);
+
+        $keyInfo = $dom->createElement('KeyInfo');
+        $signature->appendChild($keyInfo);
+        $x509Data = $dom->createElement('X509Data');
+        $keyInfo->appendChild($x509Data);
+        $x509Cert = $dom->createElement('X509Certificate', $cleanCert);
+        $x509Data->appendChild($x509Cert);
+
+        return $dom->saveXML();
+    }
+
     // =========================================================================
     // FUNÇÕES AUXILIARES
     // =========================================================================
@@ -351,4 +538,22 @@ class NFSeNacional
         ];
     }
 
+    /**
+     * Remove caracteres nÃƒÆ’Ã‚Â£o numÃƒÆ’Ã‚Â©ricos
+     */
+    private function apenasNumeros(string $valor): string
+    {
+        return preg_replace('/[^0-9]/', '', $valor);
+    }
+
+    /**
+     * Adiciona elemento ao XML
+     */
+    private function addElement(DOMDocument $dom, \DOMElement $parent, string $name, string $value): void
+    {
+        if ($value !== '') {
+            $element = $dom->createElement($name, htmlspecialchars($value, ENT_XML1, 'UTF-8'));
+            $parent->appendChild($element);
+        }
+    }
 }
