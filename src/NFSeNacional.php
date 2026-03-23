@@ -432,6 +432,93 @@ class NFSeNacional
 
         return "DPS{$cMun}{$tpInsc}{$cnpjCpf}{$serieStr}{$nDpsStr}";
     }
+
+    /**
+     * Realiza a assinatura digital XML-DSIG no XML da DPS
+     * * @param string $xml Elemento XML limpo
+     * @return string XML assinado
+     */
+    public function assinarXML(string $xml): string
+    {
+        $dom = new DOMDocument('1.0', 'UTF-8');
+        $dom->preserveWhiteSpace = false;
+        $dom->formatOutput = false;
+        $dom->loadXML($xml);
+
+        // Identifica o nÃ³ que serÃ¡ assinado (infDPS)
+        $node = $dom->getElementsByTagName('infDPS')->item(0);
+        $id = $node->getAttribute('Id');
+        
+        // Extrai a chave privada do certificado PFX
+        $pfxContent = file_get_contents($this->certPath);
+        openssl_pkcs12_read($pfxContent, $certs, $this->certPassword);
+        $privateKey = $certs['pkey'];
+        $publicCert = $certs['cert'];
+
+        // 1. Limpa o certificado (remove headers/footers) para o nÃ³ X509Certificate
+        $cleanCert = str_replace(["-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----", "\n", "\r"], '', $publicCert);
+
+        // 2. CanonicalizaÃ§Ã£o do nÃ³ infDPS (C14N)
+        $canonInfDPS = $node->C14N(false, false);
+        $digestValue = base64_encode(sha1($canonInfDPS, true));
+
+        // 3. Monta o nÃ³ Signature
+        $signature = $dom->createElementNS('http://www.w3.org/2000/09/xmldsig#', 'Signature');
+        $dom->documentElement->appendChild($signature);
+
+        $signedInfo = $dom->createElement('SignedInfo');
+        $signature->appendChild($signedInfo);
+
+        // MÃ©todos de CanonicalizaÃ§Ã£o e Assinatura
+        $nav = $dom->createElement('CanonicalizationMethod');
+        $nav->setAttribute('Algorithm', 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315');
+        $signedInfo->appendChild($nav);
+
+        $sm = $dom->createElement('SignatureMethod');
+        $sm->setAttribute('Algorithm', 'http://www.w3.org/2000/09/xmldsig#rsa-sha1');
+        $signedInfo->appendChild($sm);
+
+        // ReferÃªncia ao ID da infDPS
+        $reference = $dom->createElement('Reference');
+        $reference->setAttribute('URI', "#$id");
+        $signedInfo->appendChild($reference);
+
+        $transforms = $dom->createElement('Transforms');
+        $reference->appendChild($transforms);
+
+        $t1 = $dom->createElement('Transform');
+        $t1->setAttribute('Algorithm', 'http://www.w3.org/2000/09/xmldsig#enveloped-signature');
+        $transforms->appendChild($t1);
+
+        $t2 = $dom->createElement('Transform');
+        $t2->setAttribute('Algorithm', 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315');
+        $transforms->appendChild($t2);
+
+        $dm = $dom->createElement('DigestMethod');
+        $dm->setAttribute('Algorithm', 'http://www.w3.org/2000/09/xmldsig#sha1');
+        $reference->appendChild($dm);
+
+        $dv = $dom->createElement('DigestValue', $digestValue);
+        $reference->appendChild($dv);
+
+        // 4. Gera a SignatureValue (Hash do SignedInfo assinado com Private Key)
+        $canonSignedInfo = $signedInfo->C14N(false, false);
+        openssl_sign($canonSignedInfo, $signatureValue, $privateKey, OPENSSL_ALGO_SHA1);
+        $signatureValueB64 = base64_encode($signatureValue);
+
+        $sv = $dom->createElement('SignatureValue', $signatureValueB64);
+        $signature->appendChild($sv);
+
+        // 5. Adiciona os dados do Certificado (KeyInfo)
+        $keyInfo = $dom->createElement('KeyInfo');
+        $signature->appendChild($keyInfo);
+        $x509Data = $dom->createElement('X509Data');
+        $keyInfo->appendChild($x509Data);
+        $x509Cert = $dom->createElement('X509Certificate', $cleanCert);
+        $x509Data->appendChild($x509Cert);
+
+        return $dom->saveXML();
+    }
     
     /**
      * Consulta os dados detalhados de uma NFSe pela Chave de Acesso
