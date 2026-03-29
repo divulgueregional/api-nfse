@@ -1,3 +1,5 @@
 /certs/*
 /esquemas/*
 /references/*
+/nbproject/private/
+/nbproject/

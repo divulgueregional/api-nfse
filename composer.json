@@ -1,5 +1,5 @@
 {
-    "name": "divulgueregional/api-nfse",
+    "name": "iggorlisboa/api-nfse",
     "description": "Api para gerar nota fiscal de serviço no ambiente nacional.",
     "license": "MIT",
     "autoload": {

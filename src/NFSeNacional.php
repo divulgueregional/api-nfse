@@ -14,7 +14,7 @@ use GuzzleHttp\Exception\RequestException;
  */
 class NFSeNacional
 {
-    // URLs de ProduÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o
+    // URLs de producao
     private const URL_PRODUCAO = 'https://sefin.nfse.gov.br';
     private const URL_PRODUCAO_DANFSE = 'https://adn.nfse.gov.br/danfse';
     private const URL_PRODUCAO_CONSULTA_PUBLICA = 'https://www.nfse.gov.br/ConsultaPublica';
@@ -419,7 +419,7 @@ class NFSeNacional
     public function gerarIdDPS(string $cMun, string $cnpjCpf, int $serie, int $nDps): string
     {
         $cnpjCpf = $this->apenasNumeros($cnpjCpf);
-        $tpInsc = strlen($cnpjCpf) === 14 ? '1' : '2';
+        $tpInsc = (strlen($cnpjCpf) === 14 ? '2' : '1');
 
         // Padroniza CNPJ/CPF para 14 dÃ­gitos
         $cnpjCpf = str_pad($cnpjCpf, 14, '0', STR_PAD_LEFT);
