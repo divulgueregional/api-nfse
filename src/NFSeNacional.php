@@ -965,4 +965,223 @@ class NFSeNacional
     {
         return number_format((float)$valor, 2, '.', '');
     }
+
+    // =========================================================================
+    // MÉTODOS ADICIONAIS
+    // =========================================================================
+
+    /**
+     * Consulta uma DPS pelo IdDPS
+     * GET /dps/{idDps}
+     * 
+     * @param string $idDps ID da DPS (42 dígitos numéricos)
+     * @return array Resultado da consulta
+     */
+    public function consultarDPSExcluir(string $idDps): array
+    {
+        try {
+            // Normaliza IdDPS (remove prefixos)
+            $idDps = str_replace(['DPS', 'NFS'], '', $idDps);
+            $idDps = trim($idDps);
+
+            if (strlen($idDps) !== 42 || !ctype_digit($idDps)) {
+                return [
+                    'codigo' => '400',
+                    'mensagem' => 'IdDPS inválido. Deve conter 42 números.'
+                ];
+            }
+
+            $response = $this->client->get("/dps/{$idDps}");
+            $body = $response->getBody()->getContents();
+            $retorno = json_decode($body, true);
+
+            return [
+                'codigo' => '000',
+                'mensagem' => 'DPS encontrada.',
+                'tipoAmbiente' => $retorno['tipoAmbiente'] ?? null,
+                'versaoAplicativo' => $retorno['versaoAplicativo'] ?? null,
+                'dataHoraProcessamento' => $retorno['dataHoraProcessamento'] ?? null,
+                'chaveAcesso' => $retorno['chaveAcesso'] ?? null,
+                'bodyOriginal' => $body
+            ];
+
+        } catch (RequestException $e) {
+            return $this->tratarExcecaoRequest($e, 'Erro ao consultar DPS');
+        } catch (Exception $e) {
+            return [
+                'codigo' => '999',
+                'mensagem' => 'Erro ao consultar DPS: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Consulta eventos de uma NFS-e
+     * GET /nfse/{chaveAcesso}/eventos/{tipoEvento}/{numSeqEvento}
+     * 
+     * @param string $chaveAcesso Chave de acesso da NFS-e
+     * @param int $tipoEvento Tipo do evento (padrão 101101 para cancelamento)
+     * @param int $numSeqEvento Número sequencial do evento
+     * @return array Resultado da consulta
+     */
+    public function consultarEventoNFSe(string $chaveAcesso, int $tipoEvento = 101101, int $numSeqEvento = 1): array
+    {
+        try {
+            $chaveAcesso = trim($chaveAcesso);
+
+            $response = $this->client->get("/nfse/{$chaveAcesso}/eventos/{$tipoEvento}/{$numSeqEvento}");
+            $body = $response->getBody()->getContents();
+            $retorno = json_decode($body, true);
+
+            $eventos = [];
+            if (!empty($retorno['eventos'])) {
+                foreach ($retorno['eventos'] as $evento) {
+                    $xmlEvento = null;
+                    if (!empty($evento['arquivoXml'])) {
+                        $xmlEvento = $this->decodificarArquivoXml($evento['arquivoXml']);
+                    }
+                    $eventos[] = [
+                        'chaveAcesso' => $evento['chaveAcesso'] ?? null,
+                        'tipoEvento' => $evento['tipoEvento'] ?? null,
+                        'numeroPedidoRegistroEvento' => $evento['numeroPedidoRegistroEvento'] ?? null,
+                        'dataHoraRecebimento' => $evento['dataHoraRecebimento'] ?? null,
+                        'xmlEvento' => $xmlEvento
+                    ];
+                }
+            }
+
+            return [
+                'codigo' => '000',
+                'mensagem' => 'Eventos encontrados.',
+                'eventos' => $eventos,
+                'bodyOriginal' => $body
+            ];
+
+        } catch (RequestException $e) {
+            return $this->tratarExcecaoRequest($e, 'Erro ao consultar evento NFS-e');
+        } catch (Exception $e) {
+            return [
+                'codigo' => '999',
+                'mensagem' => 'Erro ao consultar evento NFS-e: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Envia NFS-e com decisão judicial
+     * POST /decisao-judicial/nfse
+     * 
+     * @param string $xmlNfse XML da NFS-e assinado
+     * @return array Resultado da operação
+     */
+    public function enviarNFSeDecisaoJudicial(string $xmlNfse): array
+    {
+        try {
+            if (strpos($xmlNfse, '<?xml') === false) {
+                $xmlNfse = '<?xml version="1.0" encoding="UTF-8"?>' . "\n" . $xmlNfse;
+            }
+
+            $nfseXmlGZipB64 = $this->toGzipBase64($xmlNfse);
+            $payload = json_encode(['nfseXmlGZipB64' => $nfseXmlGZipB64]);
+
+            $response = $this->client->post('/decisao-judicial/nfse', [
+                'body' => $payload
+            ]);
+
+            $statusCode = $response->getStatusCode();
+            $body = $response->getBody()->getContents();
+            $retorno = json_decode($body, true);
+
+            if ($statusCode === 201) {
+                return [
+                    'codigo' => '000',
+                    'mensagem' => 'NFS-e com decisão judicial registrada com sucesso.',
+                    'chaveAcesso' => $retorno['chaveAcesso'] ?? null,
+                    'dataHoraProcessamento' => $retorno['dataHoraProcessamento'] ?? null,
+                    'bodyOriginal' => $body
+                ];
+            }
+
+            return [
+                'codigo' => (string)$statusCode,
+                'mensagem' => 'Erro ao enviar NFS-e decisão judicial.',
+                'bodyOriginal' => $body
+            ];
+
+        } catch (RequestException $e) {
+            return $this->tratarExcecaoRequest($e, 'Erro ao enviar NFS-e decisão judicial');
+        } catch (Exception $e) {
+            return [
+                'codigo' => '999',
+                'mensagem' => 'Erro ao enviar NFS-e decisão judicial: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Retorna o tipo de ambiente atual
+     * 
+     * @return int Tipo de ambiente (1=Produção, 2=Homologação)
+     */
+    public function getTipoAmbiente(): int
+    {
+        return $this->tpAmb;
+    }
+
+    /**
+     * Retorna a URL base atual
+     * 
+     * @return string URL base
+     */
+    public function getUrlBase(): string
+    {
+        return $this->urlBase;
+    }
+
+    /**
+     * Decodifica a chave de acesso da NFS-e
+     * 
+     * @param string $chave Chave de acesso (50 dígitos)
+     * @return array Dados decodificados da chave
+     */
+    public function decodificarChaveNFSe(string $chave): array
+    {
+        $chave = preg_replace('/\D/', '', $chave);
+
+        if (strlen($chave) !== 50) {
+            throw new \Exception("Chave de acesso inválida para este padrão. Esperado: 50 caracteres.");
+        }
+
+        return [
+            'uf'              => substr($chave, 0, 2),        // 52
+            'codigoMunicipio' => substr($chave, 0, 7),        // 5208707
+            'cnpjPrestador'   => substr($chave, 9, 14),       // 35485290000195
+            'serie'           => substr($chave, 23, 3),       // 000
+            'numeroNota'      => substr($chave, 26, 10),      // 0000000001
+            'codigoNumerico'  => substr($chave, 36, 13),      // 2603506738219
+            'dv'              => substr($chave, 49, 1)        // 3
+        ];
+    }
+
+    /**
+     * Decodifica arquivo XML da resposta da API
+     * 
+     * @param string $arquivoXml XML codificado em base64
+     * @return string XML decodificado
+     */
+    private function decodificarArquivoXml(string $arquivoXml): ?string
+    {
+        try {
+            $decoded = base64_decode($arquivoXml);
+            
+            // Verifica se é GZip (magic bytes 1F 8B)
+            if (strlen($decoded) >= 2 && ord($decoded[0]) === 0x1F && ord($decoded[1]) === 0x8B) {
+                $decoded = gzdecode($decoded);
+            }
+
+            return $decoded ?: $arquivoXml;
+        } catch (Exception $e) {
+            return null;
+        }
+    }
 }
