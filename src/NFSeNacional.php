@@ -14,13 +14,13 @@ use GuzzleHttp\Exception\RequestException;
  */
 class NFSeNacional
 {
-    // URLs de ProduÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o
+    // URLs de Produção
     private const URL_PRODUCAO = 'https://sefin.nfse.gov.br';
     private const URL_PRODUCAO_DANFSE = 'https://adn.nfse.gov.br/danfse';
     private const URL_PRODUCAO_CONSULTA_PUBLICA = 'https://www.nfse.gov.br/ConsultaPublica';
     private const URL_PRODUCAO_PARAMETRIZACAO = 'https://adn.nfse.gov.br/parametrizacao';
 
-    // URLs de HomologaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o
+    // URLs de Homologação
     private const URL_HOMOLOGACAO = 'https://sefin.producaorestrita.nfse.gov.br';
     private const URL_HOMOLOGACAO_DANFSE = 'https://adn.producaorestrita.nfse.gov.br/danfse';
     private const URL_HOMOLOGACAO_CONSULTA_PUBLICA = 'https://adn.producaorestrita.nfse.gov.br/consultapublica';
@@ -91,18 +91,18 @@ class NFSeNacional
         ];
 
         if ($this->certPath && $this->certPassword) {
-            // O cURL nÃ£o lÃª PFX direto. Vamos extrair para um formato que ele aceite (PEM)
+            // O cURL não lê PFX direto. Vamos extrair para um formato que ele aceite (PEM)
             $pfxContent = file_get_contents($this->certPath);
             if (openssl_pkcs12_read($pfxContent, $certs, $this->certPassword)) {
-                // Criamos um arquivo temporÃ¡rio que contÃ©m o Certificado + Chave Privada
+                // Criamos um arquivo temporário que contém o Certificado + Chave Privada
                 $tempPem = tempnam(sys_get_temp_dir(), 'cert_');
                 $pemData = $certs['cert'] . "\n" . $certs['pkey'];
                 file_put_contents($tempPem, $pemData);
                 
-                // Passamos o caminho do arquivo temporÃ¡rio para o Guzzle
+                // Passamos o caminho do arquivo temporário para o Guzzle
                 $options['cert'] = [$tempPem, $this->certPassword];
                 
-                // Opcional: registrar para deletar o arquivo ao fim da execuÃ§Ã£o
+                // Opcional: registrar para deletar o arquivo ao fim da execução
                 register_shutdown_function(function() use ($tempPem) {
                     if (file_exists($tempPem)) @unlink($tempPem);
                 });
@@ -113,7 +113,7 @@ class NFSeNacional
     }
 
     /**
-     * Monta o XML da DPS (DeclaraÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de PrestaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de ServiÃƒÆ’Ã‚Â§os)
+     * Monta o XML da DPS (Declaração de Prestação de Serviços)
      * 
      * @param array $dados Dados da DPS
      * @return string XML da DPS (sem assinatura)
@@ -122,7 +122,7 @@ class NFSeNacional
     {
         $ns = self::NS_NFSE;
 
-        // Dados obrigatÃƒÆ’Ã‚Â³rios
+        // Dados obrigatórios
         $idDps = $dados['idDps'];
         $dhEmi = $dados['dhEmi'] ?? date('Y-m-d\TH:i:sP');
         $serie = $dados['serie'] ?? '1';
@@ -137,7 +137,7 @@ class NFSeNacional
         // Tomador
         $toma = $dados['tomador'];
 
-        // ServiÃƒÆ’Ã‚Â§o
+        // Serviço
         $serv = $dados['servico'];
 
         // Valores
@@ -156,7 +156,7 @@ class NFSeNacional
         $infDPS->setAttribute('Id', $idDps);
         $dps->appendChild($infDPS);
 
-        // Campos obrigatÃƒÆ’Ã‚Â³rios
+        // Campos obrigatórios
         $this->addElement($xml, $infDPS, 'tpAmb', (string)$this->tpAmb);
         $this->addElement($xml, $infDPS, 'dhEmi', $dhEmi);
         $this->addElement($xml, $infDPS, 'verAplic', self::VER_APLIC);
@@ -183,7 +183,7 @@ class NFSeNacional
             $this->addElement($xml, $prestEl, 'email', $prest['email']);
         }
 
-        // Regime tributÃƒÆ’Ã‚Â¡rio do prestador
+        // Regime tributário do prestador
         if (!empty($prest['regTrib'])) {
             $regTrib = $xml->createElement('regTrib');
             $prestEl->appendChild($regTrib);
@@ -213,7 +213,7 @@ class NFSeNacional
             $this->addElement($xml, $tomaEl, 'xNome', $toma['xNome']);
         }
 
-        // EndereÃƒÆ’Ã‚Â§o do tomador
+        // Endereço do tomador
         if (!empty($toma['endereco'])) {
             $endEl = $xml->createElement('end');
             $tomaEl->appendChild($endEl);
@@ -246,22 +246,22 @@ class NFSeNacional
             $this->addElement($xml, $tomaEl, 'email', $toma['email']);
         }
 
-        // ServiÃƒÆ’Ã‚Â§o
+        // Serviço
         $servEl = $xml->createElement('serv');
         $infDPS->appendChild($servEl);
 
-        // Local de prestaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o
+        // Local de prestação
         $locPrest = $xml->createElement('locPrest');
         $servEl->appendChild($locPrest);
         $this->addElement($xml, $locPrest, 'cLocPrestacao', $serv['cLocPrestacao']);
 
-        // CÃƒÆ’Ã‚Â³digo do serviÃƒÆ’Ã‚Â§o
+        // Código do serviço
         $cServ = $xml->createElement('cServ');
         $servEl->appendChild($cServ);
         $this->addElement($xml, $cServ, 'cTribNac', str_replace('.', '', $serv['cTribNac']));
         $this->addElement($xml, $cServ, 'xDescServ', $serv['xDescServ']);
 
-        // InformaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes complementares
+        // Informações complementares
         if (!empty($serv['xInfComp'])) {
             $infoCompl = $xml->createElement('infoCompl');
             $servEl->appendChild($infoCompl);
@@ -272,7 +272,7 @@ class NFSeNacional
         $valoresEl = $xml->createElement('valores');
         $infDPS->appendChild($valoresEl);
 
-        // Valor do serviÃƒÆ’Ã‚Â§o prestado
+        // Valor do serviço prestado
         $vServPrest = $xml->createElement('vServPrest');
         $valoresEl->appendChild($vServPrest);
         $this->addElement($xml, $vServPrest, 'vServ', $this->formatarValor($valores['vServ']));
@@ -291,8 +291,8 @@ class NFSeNacional
         $this->addElement($xml, $tribMun, 'tribISSQN', (string)($valores['tribISSQN'] ?? '1'));
         $this->addElement($xml, $tribMun, 'tpRetISSQN', $tpRetISSQN);
         
-        // REGRA E0625: SÃ³ envia alÃ­quota se houver retenÃ§Ã£o (tpRetISSQN != 1)
-        // Ou se vocÃª nÃ£o for do Simples Nacional. 
+        // REGRA E0625: Só envia alíquota se houver retenção (tpRetISSQN != 1)
+        // Ou se você não for do Simples Nacional. 
         // Para o seu teste atual, vamos apenas comentar/remover o envio da pAliq:
         /* if (isset($valores['pAliq'])) {
             $this->addElement($xml, $tribMun, 'pAliq', $this->formatarValor($valores['pAliq']));
@@ -323,12 +323,12 @@ class NFSeNacional
 
 
 
-        // 3. Totais dos Tributos (SoluÃ§Ã£o para Simples Nacional / ME-EPP)
+        // 3. Totais dos Tributos (Solução para Simples Nacional / ME-EPP)
         $totTrib = $xml->createElement('totTrib');
         $trib->appendChild($totTrib);
 
-        // O Schema exige um filho. O NegÃ³cio proibiu o 'indTotTrib'.
-        // Usaremos o 'pTotTribSN' que Ã© o campo especÃ­fico para o seu regime.
+        // O Schema exige um filho. O Negócio proibiu o 'indTotTrib'.
+        // Usaremos o 'pTotTribSN' que é o campo específico para o seu regime.
         $this->addElement($xml, $totTrib, 'pTotTribSN', '0.00');
 
         return $xml->saveXML();
@@ -343,12 +343,12 @@ class NFSeNacional
      * POST /nfse
      * 
      * @param string $xmlDps XML da DPS assinado
-     * @return array Resultado da operaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o
+     * @return array Resultado da operação
      */
     public function enviarDPS(string $xmlDps): array
     {
         try {
-            // Adiciona declaraÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o XML se nÃƒÆ’Ã‚Â£o existir
+            // Adiciona declaração XML se não existir
             if (strpos($xmlDps, '<?xml') === false) {
                 $xmlDps = '<?xml version="1.0" encoding="UTF-8"?>' . "\n" . $xmlDps;
             }
@@ -359,7 +359,7 @@ class NFSeNacional
             // Monta payload JSON
             $payload = json_encode(['dpsXmlGZipB64' => $dpsXmlGZipB64]);
 
-            // Faz requisiÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o POST
+            // Faz requisição POST
             $response = $this->client->post('/SefinNacional/nfse', [
                 'body' => $payload
             ]);
@@ -407,13 +407,13 @@ class NFSeNacional
     }
 
     /**
-     * Gera o IdDPS conforme padrÃ£o nacional
+     * Gera o IdDPS conforme padrão nacional
      * Formato: DPS + cMun(7) + tpInsc(1) + CNPJ/CPF(14) + serie(5) + nDPS(15)
      * 
-     * @param string $cMun CÃ³digo IBGE do municÃ­pio (7 dÃ­gitos)
+     * @param string $cMun Código IBGE do município (7 dígitos)
      * @param string $cnpjCpf CNPJ ou CPF do prestador
-     * @param int $serie SÃ©rie da DPS
-     * @param int $nDps NÃºmero da DPS
+     * @param int $serie Série da DPS
+     * @param int $nDps Número da DPS
      * @return string IdDPS com 45 caracteres
      */
     public function gerarIdDPS(string $cMun, string $cnpjCpf, int $serie, int $nDps): string
@@ -421,13 +421,13 @@ class NFSeNacional
         $cnpjCpf = $this->apenasNumeros($cnpjCpf);
         $tpInsc = strlen($cnpjCpf) === 14 ? '1' : '2';
 
-        // Padroniza CNPJ/CPF para 14 dÃ­gitos
+        // Padroniza CNPJ/CPF para 14 dígitos
         $cnpjCpf = str_pad($cnpjCpf, 14, '0', STR_PAD_LEFT);
 
-        // Padroniza sÃ©rie para 5 dÃ­gitos
+        // Padroniza série para 5 dígitos
         $serieStr = str_pad((string)$serie, 5, '0', STR_PAD_LEFT);
 
-        // Padroniza nÃºmero para 15 dÃ­gitos
+        // Padroniza número para 15 dígitos
         $nDpsStr = str_pad((string)$nDps, 15, '0', STR_PAD_LEFT);
 
         return "DPS{$cMun}{$tpInsc}{$cnpjCpf}{$serieStr}{$nDpsStr}";
@@ -445,7 +445,7 @@ class NFSeNacional
         $dom->formatOutput = false;
         $dom->loadXML($xml);
 
-        // Identifica o nÃ³ que serÃ¡ assinado (infDPS)
+        // Identifica o nó que será assinado (infDPS)
         $node = $dom->getElementsByTagName('infDPS')->item(0);
         $id = $node->getAttribute('Id');
         
@@ -455,21 +455,21 @@ class NFSeNacional
         $privateKey = $certs['pkey'];
         $publicCert = $certs['cert'];
 
-        // 1. Limpa o certificado (remove headers/footers) para o nÃ³ X509Certificate
+        // 1. Limpa o certificado (remove headers/footers) para o nó X509Certificate
         $cleanCert = str_replace(["-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----", "\n", "\r"], '', $publicCert);
 
-        // 2. CanonicalizaÃ§Ã£o do nÃ³ infDPS (C14N)
+        // 2. Canonicalização do nó infDPS (C14N)
         $canonInfDPS = $node->C14N(false, false);
         $digestValue = base64_encode(sha1($canonInfDPS, true));
 
-        // 3. Monta o nÃ³ Signature
+        // 3. Monta o nó Signature
         $signature = $dom->createElementNS('http://www.w3.org/2000/09/xmldsig#', 'Signature');
         $dom->documentElement->appendChild($signature);
 
         $signedInfo = $dom->createElement('SignedInfo');
         $signature->appendChild($signedInfo);
 
-        // MÃ©todos de CanonicalizaÃ§Ã£o e Assinatura
+        // Métodos de Canonicalização e Assinatura
         $nav = $dom->createElement('CanonicalizationMethod');
         $nav->setAttribute('Algorithm', 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315');
         $signedInfo->appendChild($nav);
@@ -478,7 +478,7 @@ class NFSeNacional
         $sm->setAttribute('Algorithm', 'http://www.w3.org/2000/09/xmldsig#rsa-sha1');
         $signedInfo->appendChild($sm);
 
-        // ReferÃªncia ao ID da infDPS
+        // Referência ao ID da infDPS
         $reference = $dom->createElement('Reference');
         $reference->setAttribute('URI', "#$id");
         $signedInfo->appendChild($reference);
@@ -608,8 +608,8 @@ class NFSeNacional
      * 
      * @param string $chaveAcesso Chave de acesso da NFS-e
      * @param string $cnpjAutor CNPJ do autor do cancelamento
-     * @param int $cMotivo CÃƒÆ’Ã‚Â³digo do motivo (1=Erro na emissÃƒÆ’Ã‚Â£o, 2=ServiÃƒÆ’Ã‚Â§o nÃƒÆ’Ã‚Â£o prestado, 3=Outros)
-     * @param string $xMotivo DescriÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o do motivo
+     * @param int $cMotivo Código do motivo (1=Erro na emissão, 2=Serviço não prestado, 3=Outros)
+     * @param string $xMotivo Descrição do motivo
      * @param string $xmlEventoAssinado XML do pedido de registro de evento assinado
      * @return array Resultado do cancelamento
      */
@@ -634,7 +634,7 @@ class NFSeNacional
             ];
 
             // 4. Envia para o governo
-            // O endpoint de cancelamento geralmente Ã© POST /nfse/{chave}/eventos
+            // O endpoint de cancelamento geralmente é POST /nfse/{chave}/eventos
             $response = $this->client->post("/SefinNacional/nfse/{$chaveAcesso}/eventos", [
                 'json' => $dados
             ]);
@@ -642,7 +642,7 @@ class NFSeNacional
             $body = $response->getBody()->getContents();
             return [
                 'codigo' => '000',
-                'mensagem' => 'RequisiÃ§Ã£o de cancelamento enviada.',
+                'mensagem' => 'Requisição de cancelamento enviada.',
                 'resposta' => json_decode($body, true)
             ];
 
@@ -658,8 +658,8 @@ class NFSeNacional
      * 
      * @param string $chaveAcesso Chave de acesso da NFS-e
      * @param string $cnpjAutor CNPJ do autor
-     * @param int $cMotivo CÃƒÆ’Ã‚Â³digo do motivo (1, 2 ou 3)
-     * @param string $xMotivo DescriÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o do motivo
+     * @param int $cMotivo Código do motivo (1, 2 ou 3)
+     * @param string $xMotivo Descrição do motivo
      * @return string XML do pedido de evento (sem assinatura)
      */
     public function montarXmlCancelamento(string $chaveAcesso, string $cnpjAutor, int $cMotivo, string $xMotivo): string
@@ -713,13 +713,13 @@ class NFSeNacional
     {
         $dom = new \DOMDocument('1.0', 'UTF-8');
         $dom->preserveWhiteSpace = false;
-        $dom->formatOutput = false; // Importante: nÃ£o formatar para nÃ£o quebrar a assinatura
+        $dom->formatOutput = false; // Importante: não formatar para não quebrar a assinatura
         $dom->loadXML($xml);
 
-        // 1. Identifica o nÃ³ pelo nome passado (infDPS ou infPedReg)
+        // 1. Identifica o nó pelo nome passado (infDPS ou infPedReg)
         $node = $dom->getElementsByTagName($rootTag)->item(0);
         if (!$node) {
-            throw new \Exception("Tag {$rootTag} nÃ£o encontrada no XML para assinatura.");
+            throw new \Exception("Tag {$rootTag} não encontrada no XML para assinatura.");
         }
         
         $id = $node->getAttribute('Id');
@@ -731,7 +731,7 @@ class NFSeNacional
         $publicCert = $certs['cert'];
         $cleanCert = str_replace(["-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----", "\n", "\r"], '', $publicCert);
 
-        // 3. Digest Value (Hash do ConteÃºdo)
+        // 3. Digest Value (Hash do Conteúdo)
         $canonNode = $node->C14N(false, false);
         $digestValue = base64_encode(sha1($canonNode, true));
 
@@ -790,8 +790,8 @@ class NFSeNacional
     }
 
     /**
-     * DistribuiÃ§Ã£o de DF-e para o Contribuinte (Baixar notas por NSU)
-     * * @param int $nsu NÃºmero Sequencial Ãšnico para inÃ­cio da consulta
+     * Distribuição de DF-e para o Contribuinte (Baixar notas por NSU)
+     * * @param int $nsu Número Sequencial Único para início da consulta
      * @param string|null $cnpjConsulta CNPJ a ser consultado (opcional se for o do certificado)
      * @param bool $lote Define se deve retornar um lote de documentos ou apenas um
      */
@@ -804,9 +804,9 @@ class NFSeNacional
             }
             $queryParams['lote'] = $lote ? 'true' : 'false';
 
-            // No padrÃ£o Nacional, esse serviÃ§o costuma rodar na URL do ADN (mesma do DANFSE)
-            // Mas o caminho base depende da implementaÃ§Ã£o da prefeitura/nacional.
-            // Vamos usar a urlParametrizacao ou urlDanfse como base de host se necessÃ¡rio
+            // No padrão Nacional, esse serviço costuma rodar na URL do ADN (mesma do DANFSE)
+            // Mas o caminho base depende da implementação da prefeitura/nacional.
+            // Vamos usar a urlParametrizacao ou urlDanfse como base de host se necessário
             $baseUrlADN = str_replace('/danfse', '', $this->urlDanfse);
             $url = "{$baseUrlADN}/contribuintes/DFe/{$nsu}";
 
@@ -940,7 +940,7 @@ class NFSeNacional
     }
 
     /**
-     * Remove caracteres nÃƒÆ’Ã‚Â£o numÃƒÆ’Ã‚Â©ricos
+     * Remove caracteres não numéricos
      */
     private function apenasNumeros(string $valor): string
     {
