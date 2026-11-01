@@ -7,6 +7,8 @@ use DOMXPath;
 use Exception;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
+use InvalidArgumentException;
+use RuntimeException;
 
 /**
  * Classe para comunicação com a API do Sistema Nacional NFS-e
@@ -41,6 +43,8 @@ class NFSeNacional
     private ?string $certPath = null;
     private ?string $certPassword = null;
     private ?string $certContent = null;
+    private ?string $tempCertFile = null;
+    private ?array $certificado = null;
 
     /**
      * Construtor da classe
@@ -90,26 +94,173 @@ class NFSeNacional
             ]
         ];
 
-        if ($this->certPath && $this->certPassword) {
-            // O cURL não lê PFX direto. Vamos extrair para um formato que ele aceite (PEM)
-            $pfxContent = file_get_contents($this->certPath);
-            if (openssl_pkcs12_read($pfxContent, $certs, $this->certPassword)) {
-                // Criamos um arquivo temporário que contém o Certificado + Chave Privada
-                $tempPem = tempnam(sys_get_temp_dir(), 'cert_');
-                $pemData = $certs['cert'] . "\n" . $certs['pkey'];
-                file_put_contents($tempPem, $pemData);
-                
-                // Passamos o caminho do arquivo temporário para o Guzzle
-                $options['cert'] = [$tempPem, $this->certPassword];
-                
-                // Opcional: registrar para deletar o arquivo ao fim da execução
-                register_shutdown_function(function() use ($tempPem) {
-                    if (file_exists($tempPem)) @unlink($tempPem);
-                });
-            }
+        // O cURL aceita o próprio PKCS#12 (.pfx/.p12) ou um arquivo PEM (certificado + chave)
+        $certFile = $this->resolverArquivoCertificado();
+        if ($certFile !== null) {
+            $options['cert'] = [$certFile, (string)$this->certPassword];
         }
 
         $this->client = new Client($options);
+    }
+
+    /**
+     * Remove o arquivo temporário do certificado (quando veio via cert_content)
+     */
+    public function __destruct()
+    {
+        if ($this->tempCertFile !== null && file_exists($this->tempCertFile)) {
+            @unlink($this->tempCertFile);
+        }
+    }
+
+    /**
+     * Resolve o arquivo do certificado digital usado na conexão mTLS.
+     * Retorna null quando nenhum certificado foi informado (uso offline).
+     */
+    private function resolverArquivoCertificado(): ?string
+    {
+        if ($this->certContent !== null && $this->certContent !== '') {
+            $conteudo = $this->conteudoCertificado();
+            $this->tempCertFile = $this->criarArquivoTemporario((string)$conteudo);
+            return $this->tempCertFile;
+        }
+
+        if ($this->certPath !== null && $this->certPath !== '') {
+            if (!is_file($this->certPath) || !is_readable($this->certPath)) {
+                throw new RuntimeException("Certificado digital não encontrado ou sem permissão de leitura: {$this->certPath}");
+            }
+            return $this->certPath;
+        }
+
+        return null;
+    }
+
+    /**
+     * Lê o certificado de cert_content (base64 ou binário) ou de cert_path
+     */
+    private function conteudoCertificado(): ?string
+    {
+        if ($this->certContent !== null && $this->certContent !== '') {
+            if (str_contains($this->certContent, '-----BEGIN')) {
+                return $this->certContent;
+            }
+
+            $decodificado = base64_decode($this->certContent, true);
+            return $decodificado !== false ? $decodificado : $this->certContent;
+        }
+
+        if ($this->certPath !== null && $this->certPath !== '') {
+            if (!is_file($this->certPath) || !is_readable($this->certPath)) {
+                throw new RuntimeException("Certificado digital não encontrado ou sem permissão de leitura: {$this->certPath}");
+            }
+
+            $conteudo = file_get_contents($this->certPath);
+            if ($conteudo === false) {
+                throw new RuntimeException("Não foi possível ler o certificado digital: {$this->certPath}");
+            }
+            return $conteudo;
+        }
+
+        return null;
+    }
+
+    /**
+     * Cria um arquivo temporário com permissão restrita para o certificado
+     */
+    private function criarArquivoTemporario(string $conteudo): string
+    {
+        $arquivo = tempnam(sys_get_temp_dir(), 'nfse_cert_');
+        if ($arquivo === false) {
+            throw new RuntimeException('Não foi possível criar o arquivo temporário do certificado digital.');
+        }
+
+        @chmod($arquivo, 0600);
+        if (file_put_contents($arquivo, $conteudo) === false) {
+            @unlink($arquivo);
+            throw new RuntimeException('Não foi possível gravar o arquivo temporário do certificado digital.');
+        }
+
+        return $arquivo;
+    }
+
+    /**
+     * Carrega o certificado e a chave privada usados na assinatura XML
+     *
+     * @return array{cert: string, pkey: string}
+     */
+    private function carregarCertificado(): array
+    {
+        if ($this->certificado !== null) {
+            return $this->certificado;
+        }
+
+        $conteudo = $this->conteudoCertificado();
+        if ($conteudo === null) {
+            throw new RuntimeException('Certificado digital não configurado. Informe cert_path ou cert_content.');
+        }
+
+        if (str_contains($conteudo, '-----BEGIN')) {
+            $this->certificado = $this->extrairPem($conteudo, (string)$this->certPassword);
+            return $this->certificado;
+        }
+
+        $certs = [];
+        if (!openssl_pkcs12_read($conteudo, $certs, (string)$this->certPassword)) {
+            throw new RuntimeException(
+                'Não foi possível ler o certificado PKCS#12: ' . $this->ultimoErroOpenSSL() .
+                '. Verifique a senha e se o arquivo é um .pfx/.p12 válido. ' .
+                'Certificados antigos (RC2/3DES) não são lidos pelo OpenSSL 3 e precisam ser convertidos para PEM: ' .
+                'openssl pkcs12 -in cert.pfx -nodes -out cert.pem'
+            );
+        }
+
+        if (empty($certs['cert']) || empty($certs['pkey'])) {
+            throw new RuntimeException('O certificado PKCS#12 não contém certificado e chave privada.');
+        }
+
+        $this->certificado = ['cert' => $certs['cert'], 'pkey' => $certs['pkey']];
+
+        return $this->certificado;
+    }
+
+    /**
+     * Extrai certificado e chave privada de um conteúdo PEM
+     *
+     * @return array{cert: string, pkey: string}
+     */
+    private function extrairPem(string $pem, string $senha): array
+    {
+        if (!preg_match('/-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----/s', $pem, $certificado)) {
+            throw new RuntimeException('Certificado PEM inválido: bloco CERTIFICATE não encontrado.');
+        }
+
+        if (!preg_match('/-----BEGIN (?:RSA |EC |ENCRYPTED )?PRIVATE KEY-----.*?-----END (?:RSA |EC |ENCRYPTED )?PRIVATE KEY-----/s', $pem, $chave)) {
+            throw new RuntimeException('Certificado PEM inválido: chave privada não encontrada.');
+        }
+
+        $chavePrivada = $chave[0];
+        if (str_contains($chavePrivada, 'ENCRYPTED')) {
+            $pkey = openssl_pkey_get_private($chavePrivada, $senha);
+            if ($pkey === false) {
+                throw new RuntimeException('Não foi possível descriptografar a chave privada PEM: ' . $this->ultimoErroOpenSSL());
+            }
+            openssl_pkey_export($pkey, $chavePrivada);
+        }
+
+        return ['cert' => $certificado[0], 'pkey' => $chavePrivada];
+    }
+
+    /**
+     * Retorna a mensagem da última falha do OpenSSL
+     */
+    private function ultimoErroOpenSSL(): string
+    {
+        $erros = [];
+        while (($erro = openssl_error_string()) !== false) {
+            $erros[] = $erro;
+        }
+
+        return $erros === [] ? 'erro desconhecido' : implode('; ', $erros);
     }
 
     /**
@@ -122,9 +273,12 @@ class NFSeNacional
     {
         $ns = self::NS_NFSE;
 
+        $this->validarDadosDPS($dados);
+
         // Dados obrigatórios
         $idDps = $dados['idDps'];
         $dhEmi = $dados['dhEmi'] ?? date('Y-m-d\TH:i:sP');
+        $verAplic = $dados['verAplic'] ?? self::VER_APLIC;
         $serie = $dados['serie'] ?? '1';
         $nDps = $dados['nDps'] ?? '1';
         $dCompet = $dados['dCompet'] ?? date('Y-m-d');
@@ -135,7 +289,7 @@ class NFSeNacional
         $prest = $dados['prestador'];
 
         // Tomador
-        $toma = $dados['tomador'];
+        $toma = $dados['tomador'] ?? [];
 
         // Serviço
         $serv = $dados['servico'];
@@ -159,7 +313,7 @@ class NFSeNacional
         // Campos obrigatórios
         $this->addElement($xml, $infDPS, 'tpAmb', (string)$this->tpAmb);
         $this->addElement($xml, $infDPS, 'dhEmi', $dhEmi);
-        $this->addElement($xml, $infDPS, 'verAplic', self::VER_APLIC);
+        $this->addElement($xml, $infDPS, 'verAplic', $verAplic);
         $this->addElement($xml, $infDPS, 'serie', $serie);
         $this->addElement($xml, $infDPS, 'nDPS', $nDps);
         $this->addElement($xml, $infDPS, 'dCompet', $dCompet);
@@ -172,6 +326,9 @@ class NFSeNacional
 
         if (!empty($prest['cnpj'])) {
             $this->addElement($xml, $prestEl, 'CNPJ', $this->apenasNumeros($prest['cnpj']));
+        }
+        if (!empty($prest['cpf'])) {
+            $this->addElement($xml, $prestEl, 'CPF', $this->apenasNumeros($prest['cpf']));
         }
         if (!empty($prest['im'])) {
             $this->addElement($xml, $prestEl, 'IM', $prest['im']);
@@ -201,7 +358,9 @@ class NFSeNacional
 
         // Tomador
         $tomaEl = $xml->createElement('toma');
-        $infDPS->appendChild($tomaEl);
+        if (!empty($toma)) {
+            $infDPS->appendChild($tomaEl);
+        }
 
         if (!empty($toma['cnpj'])) {
             $this->addElement($xml, $tomaEl, 'CNPJ', $this->apenasNumeros($toma['cnpj']));
@@ -258,8 +417,11 @@ class NFSeNacional
         // Código do serviço
         $cServ = $xml->createElement('cServ');
         $servEl->appendChild($cServ);
-        $this->addElement($xml, $cServ, 'cTribNac', str_replace('.', '', $serv['cTribNac']));
+        $this->addElement($xml, $cServ, 'cTribNac', $this->apenasNumeros($serv['cTribNac']));
         $this->addElement($xml, $cServ, 'xDescServ', $serv['xDescServ']);
+        if (!empty($serv['cIntContrib'])) {
+            $this->addElement($xml, $cServ, 'cIntContrib', $serv['cIntContrib']);
+        }
 
         // Informações complementares
         if (!empty($serv['xInfComp'])) {
@@ -329,9 +491,44 @@ class NFSeNacional
 
         // O Schema exige um filho. O Negócio proibiu o 'indTotTrib'.
         // Usaremos o 'pTotTribSN' que é o campo específico para o seu regime.
-        $this->addElement($xml, $totTrib, 'pTotTribSN', '0.00');
+        $this->addElement($xml, $totTrib, 'pTotTribSN', $this->formatarValor($valores['pTotTribSN'] ?? 0));
 
-        return $xml->saveXML();
+        $xmlDps = $xml->saveXML();
+        if ($xmlDps === false) {
+            throw new RuntimeException('Não foi possível gerar o XML da DPS.');
+        }
+
+        return $xmlDps;
+    }
+
+    /**
+     * Valida os campos obrigatórios da DPS antes de montar o XML
+     */
+    private function validarDadosDPS(array $dados): void
+    {
+        foreach (['idDps', 'cLocEmi', 'prestador', 'servico', 'valores'] as $campo) {
+            if (empty($dados[$campo])) {
+                throw new InvalidArgumentException("Campo obrigatório ausente na DPS: {$campo}");
+            }
+        }
+
+        if (!preg_match('/^DPS\d{42}$/', (string)$dados['idDps'])) {
+            throw new InvalidArgumentException('IdDPS inválido. Use gerarIdDPS() para montar o valor no padrão DPS + 42 dígitos.');
+        }
+
+        if (empty($dados['prestador']['cnpj']) && empty($dados['prestador']['cpf'])) {
+            throw new InvalidArgumentException('Informe o CNPJ ou CPF do prestador.');
+        }
+
+        foreach (['cLocPrestacao', 'cTribNac', 'xDescServ'] as $campo) {
+            if (empty($dados['servico'][$campo])) {
+                throw new InvalidArgumentException("Campo obrigatório ausente no serviço: {$campo}");
+            }
+        }
+
+        if (!isset($dados['valores']['vServ']) || $dados['valores']['vServ'] === '') {
+            throw new InvalidArgumentException('Campo obrigatório ausente nos valores: vServ');
+        }
     }
 
     // =========================================================================
@@ -418,8 +615,25 @@ class NFSeNacional
      */
     public function gerarIdDPS(string $cMun, string $cnpjCpf, int $serie, int $nDps): string
     {
+        $cMun = $this->apenasNumeros($cMun);
+        if (strlen($cMun) !== 7) {
+            throw new InvalidArgumentException('cMun deve conter 7 dígitos (código IBGE do município).');
+        }
+
         $cnpjCpf = $this->apenasNumeros($cnpjCpf);
-        $tpInsc = strlen($cnpjCpf) === 14 ? '1' : '2';
+        if (!in_array(strlen($cnpjCpf), [11, 14], true)) {
+            throw new InvalidArgumentException('CNPJ/CPF do prestador deve conter 11 ou 14 dígitos.');
+        }
+
+        if ($serie < 0 || $serie > 99999) {
+            throw new InvalidArgumentException('A série da DPS deve estar entre 0 e 99999.');
+        }
+
+        if ($nDps < 1 || $nDps > 999999999999999) {
+            throw new InvalidArgumentException('O número da DPS deve estar entre 1 e 999999999999999.');
+        }
+
+        $tpInsc = strlen($cnpjCpf) === 14 ? '2' : '1'; // 1=CPF, 2=CNPJ (regra E0004)
 
         // Padroniza CNPJ/CPF para 14 dígitos
         $cnpjCpf = str_pad($cnpjCpf, 14, '0', STR_PAD_LEFT);
@@ -440,27 +654,56 @@ class NFSeNacional
      */
     public function assinarXML(string $xml): string
     {
+        return $this->assinarXmlTag($xml, 'infDPS');
+    }
+
+    /**
+     * Assina digitalmente (XML-DSIG) o nó indicado do XML
+     *
+     * @param string $xml XML a assinar
+     * @param string $rootTag Nome da tag que receberá a assinatura (infDPS, infPedReg, ...)
+     * @return string XML assinado
+     */
+    private function assinarXmlTag(string $xml, string $rootTag): string
+    {
         $dom = new DOMDocument('1.0', 'UTF-8');
         $dom->preserveWhiteSpace = false;
         $dom->formatOutput = false;
-        $dom->loadXML($xml);
 
-        // Identifica o nó que será assinado (infDPS)
-        $node = $dom->getElementsByTagName('infDPS')->item(0);
+        if (!@$dom->loadXML($xml)) {
+            throw new RuntimeException('XML inválido para assinatura.');
+        }
+
+        // Identifica o nó que será assinado (infDPS, infPedReg, ...)
+        $node = $dom->getElementsByTagName($rootTag)->item(0);
+        if (!$node instanceof \DOMElement) {
+            throw new RuntimeException("Tag {$rootTag} não encontrada no XML para assinatura.");
+        }
+
         $id = $node->getAttribute('Id');
-        
-        // Extrai a chave privada do certificado PFX
-        $pfxContent = file_get_contents($this->certPath);
-        openssl_pkcs12_read($pfxContent, $certs, $this->certPassword);
-        $privateKey = $certs['pkey'];
-        $publicCert = $certs['cert'];
+        if ($id === '') {
+            throw new RuntimeException("Atributo Id ausente na tag {$rootTag}.");
+        }
+
+        // Extrai a chave privada do certificado (PFX ou PEM)
+        $certificado = $this->carregarCertificado();
+        $privateKey = $certificado['pkey'];
+        $publicCert = $certificado['cert'];
+
+        // Remove assinaturas anteriores para permitir reassinatura do mesmo XML
+        foreach (iterator_to_array($dom->getElementsByTagNameNS('http://www.w3.org/2000/09/xmldsig#', 'Signature')) as $assinaturaAntiga) {
+            $assinaturaAntiga->parentNode?->removeChild($assinaturaAntiga);
+        }
 
         // 1. Limpa o certificado (remove headers/footers) para o nó X509Certificate
-        $cleanCert = str_replace(["-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----", "\n", "\r"], '', $publicCert);
+        $cleanCert = preg_replace('/-----[^-]+-----|\s+/', '', $publicCert);
 
-        // 2. Canonicalização do nó infDPS (C14N)
-        $canonInfDPS = $node->C14N(false, false);
-        $digestValue = base64_encode(sha1($canonInfDPS, true));
+        // 2. Canonicalização do nó assinado (C14N)
+        $canonNode = $node->C14N(false, false);
+        if ($canonNode === false) {
+            throw new RuntimeException('Não foi possível canonicalizar o XML para assinatura.');
+        }
+        $digestValue = base64_encode(sha1($canonNode, true));
 
         // 3. Monta o nó Signature
         $signature = $dom->createElementNS('http://www.w3.org/2000/09/xmldsig#', 'Signature');
@@ -478,7 +721,7 @@ class NFSeNacional
         $sm->setAttribute('Algorithm', 'http://www.w3.org/2000/09/xmldsig#rsa-sha1');
         $signedInfo->appendChild($sm);
 
-        // Referência ao ID da infDPS
+        // Referência ao ID do nó assinado
         $reference = $dom->createElement('Reference');
         $reference->setAttribute('URI', "#$id");
         $signedInfo->appendChild($reference);
@@ -503,7 +746,13 @@ class NFSeNacional
 
         // 4. Gera a SignatureValue (Hash do SignedInfo assinado com Private Key)
         $canonSignedInfo = $signedInfo->C14N(false, false);
-        openssl_sign($canonSignedInfo, $signatureValue, $privateKey, OPENSSL_ALGO_SHA1);
+        if ($canonSignedInfo === false) {
+            throw new RuntimeException('Não foi possível canonicalizar o SignedInfo para assinatura.');
+        }
+
+        if (!openssl_sign($canonSignedInfo, $signatureValue, $privateKey, OPENSSL_ALGO_SHA1)) {
+            throw new RuntimeException('Falha ao assinar o XML: ' . $this->ultimoErroOpenSSL());
+        }
         $signatureValueB64 = base64_encode($signatureValue);
 
         $sv = $dom->createElement('SignatureValue', $signatureValueB64);
@@ -514,15 +763,20 @@ class NFSeNacional
         $signature->appendChild($keyInfo);
         $x509Data = $dom->createElement('X509Data');
         $keyInfo->appendChild($x509Data);
-        $x509Cert = $dom->createElement('X509Certificate', $cleanCert);
+        $x509Cert = $dom->createElement('X509Certificate', (string)$cleanCert);
         $x509Data->appendChild($x509Cert);
 
-        return $dom->saveXML();
+        $xmlAssinado = $dom->saveXML();
+        if ($xmlAssinado === false) {
+            throw new RuntimeException('Não foi possível gerar o XML assinado.');
+        }
+
+        return $xmlAssinado;
     }
     
     /**
      * Consulta os dados detalhados de uma NFSe pela Chave de Acesso
-     * GET /nfse/{chaveAcesso}
+     * GET /SefinNacional/nfse/{chaveAcesso}
      */
     public function consultarNFSePorChave(string $chaveAcesso): array
     {
@@ -530,11 +784,8 @@ class NFSeNacional
 
             $chaveAcesso = trim($chaveAcesso);
 
-            $url = $this->tpAmb === 1
-                ? "https://adn.nfse.gov.br/nfse/{$chaveAcesso}"
-                : "https://adn.producaorestrita.nfse.gov.br/contribuintes/NFSe/{$chaveAcesso}/Eventos";
-
-            $response = $this->client->get($url, [
+            // A consulta da NFS-e é feita no SEFIN Nacional (mesma base do envio da DPS)
+            $response = $this->client->get("/SefinNacional/nfse/{$chaveAcesso}", [
                 'headers' => [
                     'Accept' => 'application/json'
                 ]
@@ -706,87 +957,17 @@ class NFSeNacional
         $this->addElement($xml, $e101101, 'cMotivo', (string)$cMotivo);
         $this->addElement($xml, $e101101, 'xMotivo', $xMotivo ?: $motivoDescricao);
 
-        return $xml->saveXML();
+        $xmlCancelamento = $xml->saveXML();
+        if ($xmlCancelamento === false) {
+            throw new RuntimeException('Não foi possível gerar o XML do cancelamento.');
+        }
+
+        return $xmlCancelamento;
     }
 
     public function assinarXMLCan(string $xml, string $rootTag = 'infPedReg'): string
     {
-        $dom = new \DOMDocument('1.0', 'UTF-8');
-        $dom->preserveWhiteSpace = false;
-        $dom->formatOutput = false; // Importante: não formatar para não quebrar a assinatura
-        $dom->loadXML($xml);
-
-        // 1. Identifica o nó pelo nome passado (infDPS ou infPedReg)
-        $node = $dom->getElementsByTagName($rootTag)->item(0);
-        if (!$node) {
-            throw new \Exception("Tag {$rootTag} não encontrada no XML para assinatura.");
-        }
-        
-        $id = $node->getAttribute('Id');
-
-        // 2. Extrai chaves do certificado
-        $pfxContent = file_get_contents($this->certPath);
-        openssl_pkcs12_read($pfxContent, $certs, $this->certPassword);
-        $privateKey = $certs['pkey'];
-        $publicCert = $certs['cert'];
-        $cleanCert = str_replace(["-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----", "\n", "\r"], '', $publicCert);
-
-        // 3. Digest Value (Hash do Conteúdo)
-        $canonNode = $node->C14N(false, false);
-        $digestValue = base64_encode(sha1($canonNode, true));
-
-        // 4. Monta a estrutura Signature
-        $signature = $dom->createElementNS('http://www.w3.org/2000/09/xmldsig#', 'Signature');
-        $dom->documentElement->appendChild($signature);
-
-        $signedInfo = $dom->createElement('SignedInfo');
-        $signature->appendChild($signedInfo);
-
-        $cm = $dom->createElement('CanonicalizationMethod');
-        $cm->setAttribute('Algorithm', 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315');
-        $signedInfo->appendChild($cm);
-
-        $sm = $dom->createElement('SignatureMethod');
-        $sm->setAttribute('Algorithm', 'http://www.w3.org/2000/09/xmldsig#rsa-sha1');
-        $signedInfo->appendChild($sm);
-
-        $reference = $dom->createElement('Reference');
-        $reference->setAttribute('URI', "#$id");
-        $signedInfo->appendChild($reference);
-
-        $transforms = $dom->createElement('Transforms');
-        $reference->appendChild($transforms);
-
-        $t1 = $dom->createElement('Transform');
-        $t1->setAttribute('Algorithm', 'http://www.w3.org/2000/09/xmldsig#enveloped-signature');
-        $transforms->appendChild($t1);
-
-        $t2 = $dom->createElement('Transform');
-        $t2->setAttribute('Algorithm', 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315');
-        $transforms->appendChild($t2);
-
-        $dm = $dom->createElement('DigestMethod');
-        $dm->setAttribute('Algorithm', 'http://www.w3.org/2000/09/xmldsig#sha1');
-        $reference->appendChild($dm);
-
-        $dv = $dom->createElement('DigestValue', $digestValue);
-        $reference->appendChild($dv);
-
-        // 5. Signature Value (Assinatura do SignedInfo)
-        $canonSignedInfo = $signedInfo->C14N(false, false);
-        openssl_sign($canonSignedInfo, $signatureValue, $privateKey, OPENSSL_ALGO_SHA1);
-        
-        $sv = $dom->createElement('SignatureValue', base64_encode($signatureValue));
-        $signature->appendChild($sv);
-
-        $keyInfo = $dom->createElement('KeyInfo');
-        $signature->appendChild($keyInfo);
-        $x509Data = $dom->createElement('X509Data');
-        $keyInfo->appendChild($x509Data);
-        $x509Cert = $dom->createElement('X509Certificate', $cleanCert);
-        $x509Data->appendChild($x509Cert);
-
-        return $dom->saveXML();
+        return $this->assinarXmlTag($xml, $rootTag);
     }
 
     /**
@@ -843,6 +1024,9 @@ class NFSeNacional
     private function toGzipBase64(string $data): string
     {
         $compressed = gzencode($data, 9);
+        if ($compressed === false) {
+            throw new RuntimeException('Não foi possível compactar o XML.');
+        }
         return base64_encode($compressed);
     }
 
@@ -851,8 +1035,17 @@ class NFSeNacional
      */
     private function fromGzipBase64(string $data): string
     {
-        $decoded = base64_decode($data);
-        return gzdecode($decoded);
+        $decoded = base64_decode($data, true);
+        if ($decoded === false) {
+            throw new RuntimeException('Conteúdo Base64 inválido na resposta da API.');
+        }
+
+        $xml = gzdecode($decoded);
+        if ($xml === false) {
+            throw new RuntimeException('Não foi possível descompactar o XML da resposta da API.');
+        }
+
+        return $xml;
     }
 
     /**
@@ -861,19 +1054,21 @@ class NFSeNacional
     private function removerAcentos(string $string): string
     {
         $acentos = [
-            'ÃƒÆ’Ã‚Â¡', 'ÃƒÆ’Ã‚Â ', 'ÃƒÆ’Ã‚Â£', 'ÃƒÆ’Ã‚Â¢', 'ÃƒÆ’Ã‚Â¤', 'ÃƒÆ’Ã‚Â©', 'ÃƒÆ’Ã‚Â¨', 'ÃƒÆ’Ã‚Âª', 'ÃƒÆ’Ã‚Â«', 'ÃƒÆ’Ã‚Â­', 'ÃƒÆ’Ã‚Â¬', 'ÃƒÆ’Ã‚Â®', 'ÃƒÆ’Ã‚Â¯',
-            'ÃƒÆ’Ã‚Â³', 'ÃƒÆ’Ã‚Â²', 'ÃƒÆ’Ã‚Âµ', 'ÃƒÆ’Ã‚Â´', 'ÃƒÆ’Ã‚Â¶', 'ÃƒÆ’Ã‚Âº', 'ÃƒÆ’Ã‚Â¹', 'ÃƒÆ’Ã‚Â»', 'ÃƒÆ’Ã‚Â¼', 'ÃƒÆ’Ã‚Â§', 'ÃƒÆ’Ã‚Â±',
-            'ÃƒÆ’Ã‚Â', 'ÃƒÆ’Ã¢â€šÂ¬', 'ÃƒÆ’Ã†â€™', 'ÃƒÆ’Ã¢â‚¬Å¡', 'ÃƒÆ’Ã¢â‚¬Å¾', 'ÃƒÆ’Ã¢â‚¬Â°', 'ÃƒÆ’Ã‹â€ ', 'ÃƒÆ’Ã…Â ', 'ÃƒÆ’Ã¢â‚¬Â¹', 'ÃƒÆ’Ã‚Â', 'ÃƒÆ’Ã…â€™', 'ÃƒÆ’Ã…Â½', 'ÃƒÆ’Ã‚Â',
-            'ÃƒÆ’Ã¢â‚¬Å“', 'ÃƒÆ’Ã¢â‚¬â„¢', 'ÃƒÆ’Ã¢â‚¬Â¢', 'ÃƒÆ’Ã¢â‚¬Â', 'ÃƒÆ’Ã¢â‚¬â€œ', 'ÃƒÆ’Ã…Â¡', 'ÃƒÆ’Ã¢â€žÂ¢', 'ÃƒÆ’Ã¢â‚¬Âº', 'ÃƒÆ’Ã…â€œ', 'ÃƒÆ’Ã¢â‚¬Â¡', 'ÃƒÆ’Ã¢â‚¬Ëœ'
-        ];
-        $semAcentos = [
-            'a', 'a', 'a', 'a', 'a', 'e', 'e', 'e', 'e', 'i', 'i', 'i', 'i',
-            'o', 'o', 'o', 'o', 'o', 'u', 'u', 'u', 'u', 'c', 'n',
-            'A', 'A', 'A', 'A', 'A', 'E', 'E', 'E', 'E', 'I', 'I', 'I', 'I',
-            'O', 'O', 'O', 'O', 'O', 'U', 'U', 'U', 'U', 'C', 'N'
+            'á' => 'a', 'à' => 'a', 'ã' => 'a', 'â' => 'a', 'ä' => 'a',
+            'é' => 'e', 'è' => 'e', 'ê' => 'e', 'ë' => 'e',
+            'í' => 'i', 'ì' => 'i', 'î' => 'i', 'ï' => 'i',
+            'ó' => 'o', 'ò' => 'o', 'õ' => 'o', 'ô' => 'o', 'ö' => 'o',
+            'ú' => 'u', 'ù' => 'u', 'û' => 'u', 'ü' => 'u',
+            'ç' => 'c', 'ñ' => 'n',
+            'Á' => 'A', 'À' => 'A', 'Ã' => 'A', 'Â' => 'A', 'Ä' => 'A',
+            'É' => 'E', 'È' => 'E', 'Ê' => 'E', 'Ë' => 'E',
+            'Í' => 'I', 'Ì' => 'I', 'Î' => 'I', 'Ï' => 'I',
+            'Ó' => 'O', 'Ò' => 'O', 'Õ' => 'O', 'Ô' => 'O', 'Ö' => 'O',
+            'Ú' => 'U', 'Ù' => 'U', 'Û' => 'U', 'Ü' => 'U',
+            'Ç' => 'C', 'Ñ' => 'N',
         ];
 
-        return str_replace($acentos, $semAcentos, $string);
+        return strtr($string, $acentos);
     }
 
     /**
@@ -944,7 +1139,7 @@ class NFSeNacional
      */
     private function apenasNumeros(string $valor): string
     {
-        return preg_replace('/[^0-9]/', '', $valor);
+        return preg_replace('/[^0-9]/', '', $valor) ?? '';
     }
 
     /**
@@ -953,7 +1148,9 @@ class NFSeNacional
     private function addElement(DOMDocument $dom, \DOMElement $parent, string $name, string $value): void
     {
         if ($value !== '') {
-            $element = $dom->createElement($name, htmlspecialchars($value, ENT_XML1, 'UTF-8'));
+            // createTextNode já escapa o conteúdo; htmlspecialchars aqui geraria escape duplo (&amp;amp;)
+            $element = $dom->createElement($name);
+            $element->appendChild($dom->createTextNode($value));
             $parent->appendChild($element);
         }
     }
@@ -991,7 +1188,7 @@ class NFSeNacional
                 ];
             }
 
-            $response = $this->client->get("/dps/{$idDps}");
+            $response = $this->client->get("/SefinNacional/dps/{$idDps}");
             $body = $response->getBody()->getContents();
             $retorno = json_decode($body, true);
 
@@ -1029,7 +1226,7 @@ class NFSeNacional
         try {
             $chaveAcesso = trim($chaveAcesso);
 
-            $response = $this->client->get("/nfse/{$chaveAcesso}/eventos/{$tipoEvento}/{$numSeqEvento}");
+            $response = $this->client->get("/SefinNacional/nfse/{$chaveAcesso}/eventos/{$tipoEvento}/{$numSeqEvento}");
             $body = $response->getBody()->getContents();
             $retorno = json_decode($body, true);
 
@@ -1084,7 +1281,7 @@ class NFSeNacional
             $nfseXmlGZipB64 = $this->toGzipBase64($xmlNfse);
             $payload = json_encode(['nfseXmlGZipB64' => $nfseXmlGZipB64]);
 
-            $response = $this->client->post('/decisao-judicial/nfse', [
+            $response = $this->client->post('/SefinNacional/decisao-judicial/nfse', [
                 'body' => $payload
             ]);
 
