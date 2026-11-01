@@ -94,10 +94,36 @@ class NFSeNacional
             ]
         ];
 
-        // O cURL aceita o próprio PKCS#12 (.pfx/.p12) ou um arquivo PEM (certificado + chave)
+        // Certificado: PFX/P12 é convertido em PEM separados (cert + chave) para o cURL
         $certFile = $this->resolverArquivoCertificado();
         if ($certFile !== null) {
-            $options['cert'] = [$certFile, (string)$this->certPassword];
+            $conteudo = @file_get_contents($certFile);
+            $certs = [];
+            if ($conteudo !== false
+                && strpos($conteudo, '-----BEGIN') === false
+                && openssl_pkcs12_read($conteudo, $certs, (string)$this->certPassword)) {
+                $dirTemp = sys_get_temp_dir();
+                if (!is_writable($dirTemp)) {
+                    $dirTemp = dirname($certFile);
+                }
+                $tempCert = @tempnam($dirTemp, 'cert_');
+                $tempKey  = @tempnam($dirTemp, 'key_');
+                if ($tempCert === false || $tempKey === false
+                    || @file_put_contents($tempCert, $certs['cert']) === false
+                    || @file_put_contents($tempKey, $certs['pkey']) === false) {
+                    throw new RuntimeException("Não foi possível gravar os PEM temporários do certificado (dir: {$dirTemp})");
+                }
+                $options['cert'] = $tempCert;
+                $options['ssl_key'] = $tempKey;
+                register_shutdown_function(function() use ($tempCert, $tempKey) {
+                    if (file_exists($tempCert)) @unlink($tempCert);
+                    if (file_exists($tempKey)) @unlink($tempKey);
+                });
+            } elseif ($conteudo !== false && strpos($conteudo, '-----BEGIN') !== false) {
+                $options['cert'] = $certFile;
+            } else {
+                throw new RuntimeException('Falha ao ler o PFX (senha do certificado incorreta?)');
+            }
         }
 
         $this->client = new Client($options);
