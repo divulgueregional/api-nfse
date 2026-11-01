@@ -18,7 +18,7 @@ composer require divulgueregional/api-nfse
 <b>Pela última tag: </b>
 
 ```bash
-composer update divulgueregional/api-nfse 1.1.4
+composer update divulgueregional/api-nfse 1.2.0
 ```
 
 Acesse a pasta docs e leia o README.md
